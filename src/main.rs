@@ -23,6 +23,11 @@ impl OrderBook {
         }
     }
 
+    fn sort_orders(&mut self) {
+        self.buy_orders.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap());
+        self.sell_orders.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
+    }
+
     fn add_buy_order(&mut self, order: Order) {
         let mut remaining_quantity = order.quantity;
         let mut i = 0;
@@ -48,6 +53,7 @@ impl OrderBook {
                 ..order
             });
         }
+        self.sort_orders();
     }
 
     fn add_sell_order(&mut self, order: Order) {
@@ -75,6 +81,7 @@ impl OrderBook {
                 ..order
             });
         }
+        self.sort_orders();
     }
 }
 
