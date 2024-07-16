@@ -1,2 +1,4 @@
 /target
 /certs
+.DS_Store
+.env
