@@ -62,15 +62,18 @@ struct Transaction {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct Portfolio {
-    assets: Vec<Asset>,
+    portfolio_id: String,
+    total_money: f64,
+    assets: HashMap<String, Asset>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct Asset {
     symbol: String,
-    quantity: u32,
+    shares: u32,
+    market_value: f64,
     average_cost: f64,
-    total_value: f64,
+    portfolio_diversity: f64,
 }
 
 struct AppState {
@@ -82,6 +85,7 @@ struct AppState {
     orders: HashMap<String, Order>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct UserState {
     user_id: String,
     orders: Vec<Order>,
@@ -97,18 +101,24 @@ async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<Registe
         Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
     };
     let user_id = Uuid::new_v4().to_string();
-    let username = user.username.clone(); // Ensure we clone the username
+    let portfolio_id = Uuid::new_v4().to_string();
+    let username = user.username.clone();
     let mut state = data.lock().unwrap();
     state.users.insert(username.clone(), UserState {
         user_id: user_id.clone(),
         orders: vec![],
         transactions: vec![],
-        portfolio: Portfolio { assets: vec![] },
+        portfolio: Portfolio { 
+            portfolio_id: portfolio_id.clone(), 
+            total_money: 0.0, 
+            assets: HashMap::new() 
+        },
     });
     HttpResponse::Ok().json(json!({
         "user_id": user_id,
         "username": username,
         "password": hashed_password,
+        "portfolio_id": portfolio_id
     }))
 }
 
@@ -183,7 +193,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
                 order_type: "buy".to_string(),
             };
 
-            // Separate mutable borrows
+            // Update user's portfolio
             {
                 let user_state = state.users.get_mut(&username).unwrap();
                 user_state.orders.push(new_order.clone());
@@ -191,6 +201,27 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
                     order_id: order_id.clone(),
                     transaction_id: format!("{:?}", tx_id),
                 });
+
+                let asset = user_state.portfolio.assets.entry(order.symbol.clone()).or_insert(Asset {
+                    symbol: order.symbol.clone(),
+                    shares: 0,
+                    market_value: 0.0,
+                    average_cost: 0.0,
+                    portfolio_diversity: 0.0,
+                });
+
+                let total_cost = asset.shares as f64 * asset.average_cost;
+                let new_total_cost = total_cost + order.quantity as f64 * order.price as f64;
+                asset.shares += order.quantity;
+                asset.average_cost = new_total_cost / asset.shares as f64;
+                asset.market_value = asset.shares as f64 * order.price as f64;
+
+                user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
+
+                // Update portfolio diversity for each asset
+                for asset in user_state.portfolio.assets.values_mut() {
+                    asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
+                }
             }
 
             state.orders.insert(order_id.clone(), new_order.clone());
@@ -209,6 +240,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
         },
     }
 }
+
 
 async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
@@ -248,14 +280,44 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
                 order_type: "sell".to_string(),
             };
 
-            // Separate mutable borrows
-            {
+            // Update user's portfolio
+            let asset_to_update = {
                 let user_state = state.users.get_mut(&username).unwrap();
                 user_state.orders.push(new_order.clone());
                 user_state.transactions.push(Transaction {
                     order_id: order_id.clone(),
                     transaction_id: format!("{:?}", tx_id),
                 });
+
+                user_state.portfolio.assets.get_mut(&order.symbol).cloned()
+            };
+
+            if let Some(mut asset) = asset_to_update {
+                if asset.shares >= order.quantity {
+                    asset.shares -= order.quantity;
+                    asset.market_value = asset.shares as f64 * order.price as f64;
+
+                    {
+                        let user_state = state.users.get_mut(&username).unwrap();
+                        user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
+
+                        // Update portfolio diversity for each asset
+                        for asset in user_state.portfolio.assets.values_mut() {
+                            asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
+                        }
+
+                        // Remove asset if no shares are left
+                        if asset.shares == 0 {
+                            user_state.portfolio.assets.remove(&order.symbol);
+                        } else {
+                            user_state.portfolio.assets.insert(order.symbol.clone(), asset);
+                        }
+                    }
+                } else {
+                    return Ok(HttpResponse::BadRequest().body("Not enough shares to sell"));
+                }
+            } else {
+                return Ok(HttpResponse::BadRequest().body("Asset not found in portfolio"));
             }
 
             state.orders.insert(order_id.clone(), new_order.clone());
@@ -274,6 +336,8 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
         },
     }
 }
+
+
 
 async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
     let state = data.lock().unwrap();
