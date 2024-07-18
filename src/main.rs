@@ -11,6 +11,24 @@ use serde_json::json;
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey, TokenData};
 use bcrypt::{hash, verify};
 use uuid::Uuid;
+use dotenv::dotenv;
+use std::env;
+
+mod schema;
+mod models;
+
+// Diesel imports
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel::RunQueryDsl;
+
+// Model imports
+use models::{User, NewUser, Order, NewOrder};
+
+// Schema imports
+use schema::users::dsl::users;
+use schema::orders::dsl::orders;
+use schema::users::dsl::{username as db_username};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -30,13 +48,25 @@ struct LoginUser {
     password: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct User {
-    user_id: String,
-    username: String,
-    password: String,
+struct AppState {
+    web3: web3::Web3<web3::transports::Http>,
+    contract_address: Address,
+    account: H160,
+    secret: String,
+    db_pool: web::Data<Mutex<SqliteConnection>>,
+    users: HashMap<String, UserState>,  // Include users field
+    orders: HashMap<String, Order>,  // Include orders field
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct UserState {
+    user_id: String,
+    orders: Vec<Order>,
+    transactions: Vec<Transaction>,
+    portfolio: Portfolio,
+}
+
+/*
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct Order {
     order_id: String,
@@ -45,7 +75,7 @@ struct Order {
     quantity: u32,
     price: u32,
     order_type: String, // Add order_type field
-}
+}*/
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct OrderRequest {
@@ -76,73 +106,78 @@ struct Asset {
     portfolio_diversity: f64,
 }
 
-struct AppState {
-    web3: web3::Web3<web3::transports::Http>,
-    contract_address: Address,
-    account: H160,
-    secret: String,
-    users: HashMap<String, UserState>,
-    orders: HashMap<String, Order>,
+pub fn establish_connection() -> SqliteConnection {
+    dotenv().ok();
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    SqliteConnection::establish(&database_url)
+        .expect(&format!("Error connecting to {}", database_url))
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct UserState {
-    user_id: String,
-    orders: Vec<Order>,
-    transactions: Vec<Transaction>,
-    portfolio: Portfolio,
-}
-
-async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<RegisterUser>) -> impl Responder {
+async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<RegisterUser>) -> Result<HttpResponse, actix_web::Error> {
     println!("Registering user: {:?}", user);
 
     let hashed_password = match hash(&user.password, 4) {
         Ok(h) => h,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+        Err(_) => return Ok(HttpResponse::InternalServerError().body("Failed to hash password")),
     };
     let user_id = Uuid::new_v4().to_string();
     let portfolio_id = Uuid::new_v4().to_string();
     let username = user.username.clone();
-    let mut state = data.lock().unwrap();
-    state.users.insert(username.clone(), UserState {
+
+    let state = data.lock().unwrap();
+    let mut conn = state.db_pool.lock().unwrap();
+
+    let new_user = NewUser {
         user_id: user_id.clone(),
-        orders: vec![],
-        transactions: vec![],
-        portfolio: Portfolio { 
-            portfolio_id: portfolio_id.clone(), 
-            total_money: 0.0, 
-            assets: HashMap::new() 
-        },
-    });
-    HttpResponse::Ok().json(json!({
+        username: user.username.clone(),
+        password: hashed_password.clone(),
+        portfolio_id: portfolio_id.clone(),
+    };
+
+    diesel::insert_into(users)
+        .values(&new_user)
+        .execute(&mut *conn)
+        .map_err(|e| {
+            error!("Error saving new user: {:?}", e);
+            actix_web::error::ErrorInternalServerError("Error saving new user")
+        })?;
+
+    Ok(HttpResponse::Ok().json(json!({
         "user_id": user_id,
         "username": username,
         "password": hashed_password,
         "portfolio_id": portfolio_id
-    }))
+    })))
 }
 
 async fn login_user(data: web::Data<Mutex<AppState>>, user: web::Json<LoginUser>) -> impl Responder {
     println!("Logging in user: {:?}", user);
 
     let state = data.lock().unwrap();
-    if let Some(_user_state) = state.users.get(&user.username) {
-        let hashed_password = match hash(&user.password, 4) {
-            Ok(h) => h,
-            Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
-        };
-        if verify(&user.password, &hashed_password).unwrap() {
+    let mut conn = state.db_pool.lock().unwrap();
+    
+    use schema::users::dsl::{users, username as db_username};
+
+    let user_in_db = users
+        .filter(db_username.eq(&user.username))
+        .select((schema::users::id, schema::users::user_id, schema::users::username, schema::users::password, schema::users::portfolio_id))
+        .first::<(i32, String, String, String, String)>(&mut *conn);
+
+    if let Ok((id, user_id, username, password, portfolio_id)) = user_in_db {
+        if verify(&user.password, &password).unwrap() {
             let my_claims = Claims { sub: user.username.clone(), exp: 10000000000 };
             let token = match encode(&Header::default(), &my_claims, &EncodingKey::from_secret(state.secret.as_ref())) {
                 Ok(t) => t,
                 Err(_) => return HttpResponse::InternalServerError().body("Failed to generate token"),
             };
-            return HttpResponse::Ok().json(token);
+            return HttpResponse::Ok().json(json!({
+                "token": token,
+                "user_id": user_id
+            }));
         }
     }
     HttpResponse::Unauthorized().body("Invalid username or password")
 }
-
 
 fn validate_token(req: &HttpRequest, secret: &str) -> Result<TokenData<Claims>, Error> {
     if let Some(auth_header) = req.headers().get("Authorization") {
@@ -155,18 +190,19 @@ fn validate_token(req: &HttpRequest, secret: &str) -> Result<TokenData<Claims>, 
     Err(actix_web::error::ErrorUnauthorized("Missing or invalid Authorization header"))
 }
 
-async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
+async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order_req: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
-    let mut state = data.lock().unwrap();
+    let state = data.lock().unwrap();
+    let mut conn = state.db_pool.lock().unwrap();
     
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
     
     let contract = Contract::from_json(state.web3.eth(), state.contract_address, abi.to_string().as_bytes()).unwrap();
 
-    info!("Placing buy order: {:?}", order);
+    info!("Placing buy order: {:?}", order_req);
     
     let options = Options {
         gas: Some(3_000_000.into()),
@@ -175,7 +211,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
 
     let result = contract.call(
         "placeBuyOrder",
-        (order.symbol.clone(), U256::from(order.quantity), U256::from(order.price)),
+        (order_req.symbol.clone(), U256::from(order_req.quantity), U256::from(order_req.price)),
         state.account,
         options
     ).await;
@@ -184,47 +220,21 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
         Ok(tx_id) => {
             info!("Buy order placed successfully");
             let order_id = Uuid::new_v4().to_string();
-            let new_order = Order {
+            let user_id: i32 = users.filter(db_username.eq(&username)).select(schema::users::id).first(&mut *conn).unwrap();
+            let new_order = NewOrder {
                 order_id: order_id.clone(),
-                user_id: state.users.get(&username).unwrap().user_id.clone(),
-                symbol: order.symbol.clone(),
-                quantity: order.quantity,
-                price: order.price,
+                user_id,
+                symbol: order_req.symbol.clone(),
+                quantity: order_req.quantity as i32,
+                price: order_req.price as i32,
                 order_type: "buy".to_string(),
             };
 
-            // Update user's portfolio
-            {
-                let user_state = state.users.get_mut(&username).unwrap();
-                user_state.orders.push(new_order.clone());
-                user_state.transactions.push(Transaction {
-                    order_id: order_id.clone(),
-                    transaction_id: format!("{:?}", tx_id),
-                });
+            diesel::insert_into(orders)
+                .values(&new_order)
+                .execute(&mut *conn)
+                .expect("Error saving new order");
 
-                let asset = user_state.portfolio.assets.entry(order.symbol.clone()).or_insert(Asset {
-                    symbol: order.symbol.clone(),
-                    shares: 0,
-                    market_value: 0.0,
-                    average_cost: 0.0,
-                    portfolio_diversity: 0.0,
-                });
-
-                let total_cost = asset.shares as f64 * asset.average_cost;
-                let new_total_cost = total_cost + order.quantity as f64 * order.price as f64;
-                asset.shares += order.quantity;
-                asset.average_cost = new_total_cost / asset.shares as f64;
-                asset.market_value = asset.shares as f64 * order.price as f64;
-
-                user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
-
-                // Update portfolio diversity for each asset
-                for asset in user_state.portfolio.assets.values_mut() {
-                    asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
-                }
-            }
-
-            state.orders.insert(order_id.clone(), new_order.clone());
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
                 "user_id": new_order.user_id,
@@ -242,18 +252,20 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
 }
 
 
-async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
+
+async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order_req: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
-    let mut state = data.lock().unwrap();
+    let state = data.lock().unwrap();
+    let mut conn = state.db_pool.lock().unwrap();
     
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
     
     let contract = Contract::from_json(state.web3.eth(), state.contract_address, abi.to_string().as_bytes()).unwrap();
 
-    info!("Placing sell order: {:?}", order);
+    info!("Placing sell order: {:?}", order_req);
     
     let options = Options {
         gas: Some(3_000_000.into()),
@@ -262,7 +274,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
 
     let result = contract.call(
         "placeSellOrder",
-        (order.symbol.clone(), U256::from(order.quantity), U256::from(order.price)),
+        (order_req.symbol.clone(), U256::from(order_req.quantity), U256::from(order_req.price)),
         state.account,
         options
     ).await;
@@ -271,56 +283,21 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
         Ok(tx_id) => {
             info!("Sell order placed successfully");
             let order_id = Uuid::new_v4().to_string();
-            let new_order = Order {
+            let user_id: i32 = users.filter(db_username.eq(&username)).select(schema::users::id).first(&mut *conn).unwrap();
+            let new_order = NewOrder {
                 order_id: order_id.clone(),
-                user_id: state.users.get(&username).unwrap().user_id.clone(),
-                symbol: order.symbol.clone(),
-                quantity: order.quantity,
-                price: order.price,
+                user_id,
+                symbol: order_req.symbol.clone(),
+                quantity: order_req.quantity as i32,
+                price: order_req.price as i32,
                 order_type: "sell".to_string(),
             };
 
-            // Update user's portfolio
-            let asset_to_update = {
-                let user_state = state.users.get_mut(&username).unwrap();
-                user_state.orders.push(new_order.clone());
-                user_state.transactions.push(Transaction {
-                    order_id: order_id.clone(),
-                    transaction_id: format!("{:?}", tx_id),
-                });
+            diesel::insert_into(orders)
+                .values(&new_order)
+                .execute(&mut *conn)
+                .expect("Error saving new order");
 
-                user_state.portfolio.assets.get_mut(&order.symbol).cloned()
-            };
-
-            if let Some(mut asset) = asset_to_update {
-                if asset.shares >= order.quantity {
-                    asset.shares -= order.quantity;
-                    asset.market_value = asset.shares as f64 * order.price as f64;
-
-                    {
-                        let user_state = state.users.get_mut(&username).unwrap();
-                        user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
-
-                        // Update portfolio diversity for each asset
-                        for asset in user_state.portfolio.assets.values_mut() {
-                            asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
-                        }
-
-                        // Remove asset if no shares are left
-                        if asset.shares == 0 {
-                            user_state.portfolio.assets.remove(&order.symbol);
-                        } else {
-                            user_state.portfolio.assets.insert(order.symbol.clone(), asset);
-                        }
-                    }
-                } else {
-                    return Ok(HttpResponse::BadRequest().body("Not enough shares to sell"));
-                }
-            } else {
-                return Ok(HttpResponse::BadRequest().body("Asset not found in portfolio"));
-            }
-
-            state.orders.insert(order_id.clone(), new_order.clone());
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
                 "user_id": new_order.user_id,
@@ -338,11 +315,16 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
 }
 
 
-
 async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
     let state = data.lock().unwrap();
-    let orders: Vec<&Order> = state.orders.values().collect();
-    HttpResponse::Ok().json(orders)
+    let mut conn = state.db_pool.lock().unwrap();
+
+    let order_list = orders
+        .select(Order::as_select())
+        .load::<Order>(&mut *conn)
+        .expect("Error loading orders");
+
+    HttpResponse::Ok().json(order_list)
 }
 
 async fn get_order_by_id(data: web::Data<Mutex<AppState>>, order_id: web::Path<String>) -> impl Responder {
@@ -354,12 +336,42 @@ async fn get_order_by_id(data: web::Data<Mutex<AppState>>, order_id: web::Path<S
     }
 }
 
-async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
     let state = data.lock().unwrap();
-    let user_orders = &state.users.get(&username).unwrap().orders;
+    let mut conn = state.db_pool.lock().unwrap();
+
+    // Ensure the authenticated user matches the requested user_id
+    let user_in_db = users
+        .filter(db_username.eq(&username))
+        .select(schema::users::user_id)
+        .first::<String>(&mut *conn)
+        .map_err(|_| actix_web::error::ErrorUnauthorized("Unauthorized user"))?;
+
+    if &user_in_db != user_id.as_str() {
+        return Ok(HttpResponse::Unauthorized().body("Unauthorized user"));
+    }
+
+    let user_id_int: i32 = users
+        .filter(db_username.eq(&username))
+        .select(schema::users::id)
+        .first(&mut *conn)
+        .map_err(|e| {
+            error!("Error loading user: {:?}", e);
+            actix_web::error::ErrorInternalServerError("Error loading user")
+        })?;
+
+    let user_orders = orders
+        .filter(schema::orders::user_id.eq(user_id_int))
+        .select(Order::as_select())
+        .load::<Order>(&mut *conn)
+        .map_err(|e| {
+            error!("Error loading orders: {:?}", e);
+            actix_web::error::ErrorInternalServerError("Error loading orders")
+        })?;
+
     Ok(HttpResponse::Ok().json(user_orders))
 }
 
@@ -391,17 +403,19 @@ async fn main() -> std::io::Result<()> {
 
     let transport = Http::new("http://localhost:8545").unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address = "0x58D2D2989ca205e3a518Cf950591E50730FBe002".parse().unwrap();
-    let account: H160 = "0xCa8161eab569Fe05EC3cA61E207aC0fB73C1Bebb".parse().unwrap();
+    let contract_address = "0x58C2FC77221f4d694Bc0e826c84ed43cFF3E886F".parse().unwrap();
+    let account: H160 = "0xB68aaD5414F2929a2aEccfCe4DD95d7Fe39BCaF6".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
 
+    let db_conn = establish_connection();
     let state = web::Data::new(Mutex::new(AppState { 
         web3, 
         contract_address, 
         account, 
         secret,
-        users: HashMap::new(), // Initialize user state
-        orders: HashMap::new(), // Initialize order state
+        db_pool: web::Data::new(Mutex::new(db_conn)),
+        users: HashMap::new(),  // Initialize user state
+        orders: HashMap::new(),  // Initialize order state
     }));
 
     HttpServer::new(move || {
@@ -411,7 +425,7 @@ async fn main() -> std::io::Result<()> {
             .route("/login", web::post().to(login_user))
             .route("/buy", web::post().to(place_buy_order))
             .route("/sell", web::post().to(place_sell_order))
-            .route("/orders", web::get().to(get_user_orders))
+            .route("/orders/{user_id}", web::get().to(get_user_orders))
             .route("/transactions", web::get().to(get_user_transactions))
             .route("/portfolio/{user_id}", web::get().to(get_user_portfolio))
             .route("/order_book", web::get().to(get_order_book))
