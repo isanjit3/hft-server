@@ -219,8 +219,12 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
     match result {
         Ok(tx_id) => {
             info!("Buy order placed successfully");
+            let (user_id, user_id_str): (i32, String) = users.filter(db_username.eq(&username))
+                .select((schema::users::id, schema::users::user_id))
+                .first(&mut *conn)
+                .unwrap();
+            
             let order_id = Uuid::new_v4().to_string();
-            let user_id: i32 = users.filter(db_username.eq(&username)).select(schema::users::id).first(&mut *conn).unwrap();
             let new_order = NewOrder {
                 order_id: order_id.clone(),
                 user_id,
@@ -237,7 +241,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
 
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
-                "user_id": new_order.user_id,
+                "user_id": user_id_str,
                 "symbol": new_order.symbol,
                 "quantity": new_order.quantity,
                 "price": new_order.price,
@@ -250,8 +254,6 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
         },
     }
 }
-
-
 
 async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order_req: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
@@ -282,8 +284,12 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
     match result {
         Ok(tx_id) => {
             info!("Sell order placed successfully");
+            let (user_id, user_id_str): (i32, String) = users.filter(db_username.eq(&username))
+                .select((schema::users::id, schema::users::user_id))
+                .first(&mut *conn)
+                .unwrap();
+            
             let order_id = Uuid::new_v4().to_string();
-            let user_id: i32 = users.filter(db_username.eq(&username)).select(schema::users::id).first(&mut *conn).unwrap();
             let new_order = NewOrder {
                 order_id: order_id.clone(),
                 user_id,
@@ -300,7 +306,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
 
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
-                "user_id": new_order.user_id,
+                "user_id": user_id_str,
                 "symbol": new_order.symbol,
                 "quantity": new_order.quantity,
                 "price": new_order.price,
@@ -313,7 +319,6 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
         },
     }
 }
-
 
 async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
     let state = data.lock().unwrap();
@@ -329,12 +334,18 @@ async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
 
 async fn get_order_by_id(data: web::Data<Mutex<AppState>>, order_id: web::Path<String>) -> impl Responder {
     let state = data.lock().unwrap();
-    if let Some(order) = state.orders.get(order_id.as_str()) {
-        HttpResponse::Ok().json(order)
-    } else {
-        HttpResponse::NotFound().body("Order not found")
+    let mut conn = state.db_pool.lock().unwrap();
+
+    use schema::orders::dsl::{orders, order_id as db_order_id};
+
+    match orders.filter(db_order_id.eq(order_id.as_str()))
+        .first::<Order>(&mut *conn)
+    {
+        Ok(order) => HttpResponse::Ok().json(order),
+        Err(_) => HttpResponse::NotFound().body("Order not found"),
     }
 }
+
 
 async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
@@ -403,8 +414,8 @@ async fn main() -> std::io::Result<()> {
 
     let transport = Http::new("http://localhost:8545").unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address = "0x58C2FC77221f4d694Bc0e826c84ed43cFF3E886F".parse().unwrap();
-    let account: H160 = "0xB68aaD5414F2929a2aEccfCe4DD95d7Fe39BCaF6".parse().unwrap();
+    let contract_address = "0xb986ecb378A372f45971797FC51bBc1F730412b8".parse().unwrap();
+    let account: H160 = "0x19105E925981210540A70F15116eF59a595a6f2b".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
 
     let db_conn = establish_connection();
