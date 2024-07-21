@@ -12,6 +12,9 @@ use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey,
 use bcrypt::{hash, verify};
 use uuid::Uuid;
 
+// Redis imports
+use redis::AsyncCommands;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
@@ -81,13 +84,16 @@ struct AppState {
     contract_address: Address,
     account: H160,
     secret: String,
-    users: HashMap<String, UserState>,
-    orders: HashMap<String, Order>,
+    redis_client: redis::Client,
+    // users: HashMap<String, UserState>,
+    // orders: HashMap<String, Order>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct UserState {
     user_id: String,
+    username: String,
+    password: String,
     orders: Vec<Order>,
     transactions: Vec<Transaction>,
     portfolio: Portfolio,
@@ -103,9 +109,12 @@ async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<Registe
     let user_id = Uuid::new_v4().to_string();
     let portfolio_id = Uuid::new_v4().to_string();
     let username = user.username.clone();
-    let mut state = data.lock().unwrap();
-    state.users.insert(username.clone(), UserState {
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state = UserState {
         user_id: user_id.clone(),
+        username: username.clone(),
+        password: hashed_password.clone(),
         orders: vec![],
         transactions: vec![],
         portfolio: Portfolio { 
@@ -113,7 +122,11 @@ async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<Registe
             total_money: 0.0, 
             assets: HashMap::new() 
         },
-    });
+    };
+
+    let user_state_json = serde_json::to_string(&user_state).unwrap();
+    let _: () = con.set(username.clone(), user_state_json).await.unwrap();
+
     HttpResponse::Ok().json(json!({
         "user_id": user_id,
         "username": username,
@@ -125,24 +138,25 @@ async fn register_user(data: web::Data<Mutex<AppState>>, user: web::Json<Registe
 async fn login_user(data: web::Data<Mutex<AppState>>, user: web::Json<LoginUser>) -> impl Responder {
     println!("Logging in user: {:?}", user);
 
-    let state = data.lock().unwrap();
-    if let Some(_user_state) = state.users.get(&user.username) {
-        let hashed_password = match hash(&user.password, 4) {
-            Ok(h) => h,
-            Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
-        };
-        if verify(&user.password, &hashed_password).unwrap() {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: Option<String> = con.get(&user.username).await.unwrap();
+
+    if let Some(user_state_json) = user_state_json {
+        let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+        if verify(&user.password, &user_state.password).unwrap() {
             let my_claims = Claims { sub: user.username.clone(), exp: 10000000000 };
-            let token = match encode(&Header::default(), &my_claims, &EncodingKey::from_secret(state.secret.as_ref())) {
+            let token = match encode(&Header::default(), &my_claims, &EncodingKey::from_secret(data.lock().unwrap().secret.as_ref())) {
                 Ok(t) => t,
                 Err(_) => return HttpResponse::InternalServerError().body("Failed to generate token"),
             };
-            return HttpResponse::Ok().json(token);
+            return HttpResponse::Ok().json(json!({
+                "token": token,
+                "user_id": user_state.user_id
+            }));
         }
     }
     HttpResponse::Unauthorized().body("Invalid username or password")
 }
-
 
 fn validate_token(req: &HttpRequest, secret: &str) -> Result<TokenData<Claims>, Error> {
     if let Some(auth_header) = req.headers().get("Authorization") {
@@ -184,9 +198,13 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
         Ok(tx_id) => {
             info!("Buy order placed successfully");
             let order_id = Uuid::new_v4().to_string();
+            let mut con = state.redis_client.get_async_connection().await.unwrap();
+            let user_state_json: String = con.get(&username).await.unwrap();
+            let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
             let new_order = Order {
                 order_id: order_id.clone(),
-                user_id: state.users.get(&username).unwrap().user_id.clone(),
+                user_id: user_state.user_id.clone(),
                 symbol: order.symbol.clone(),
                 quantity: order.quantity,
                 price: order.price,
@@ -194,37 +212,41 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
             };
 
             // Update user's portfolio
-            {
-                let user_state = state.users.get_mut(&username).unwrap();
-                user_state.orders.push(new_order.clone());
-                user_state.transactions.push(Transaction {
-                    order_id: order_id.clone(),
-                    transaction_id: format!("{:?}", tx_id),
-                });
+            user_state.orders.push(new_order.clone());
+            user_state.transactions.push(Transaction {
+                order_id: order_id.clone(),
+                transaction_id: format!("{:?}", tx_id),
+            });
 
-                let asset = user_state.portfolio.assets.entry(order.symbol.clone()).or_insert(Asset {
-                    symbol: order.symbol.clone(),
-                    shares: 0,
-                    market_value: 0.0,
-                    average_cost: 0.0,
-                    portfolio_diversity: 0.0,
-                });
+            let asset = user_state.portfolio.assets.entry(order.symbol.clone()).or_insert(Asset {
+                symbol: order.symbol.clone(),
+                shares: 0,
+                market_value: 0.0,
+                average_cost: 0.0,
+                portfolio_diversity: 0.0,
+            });
 
-                let total_cost = asset.shares as f64 * asset.average_cost;
-                let new_total_cost = total_cost + order.quantity as f64 * order.price as f64;
-                asset.shares += order.quantity;
-                asset.average_cost = new_total_cost / asset.shares as f64;
-                asset.market_value = asset.shares as f64 * order.price as f64;
+            let total_cost = asset.shares as f64 * asset.average_cost;
+            let new_total_cost = total_cost + order.quantity as f64 * order.price as f64;
+            asset.shares += order.quantity;
+            asset.average_cost = new_total_cost / asset.shares as f64;
+            asset.market_value = asset.shares as f64 * order.price as f64;
 
-                user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
+            user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
 
-                // Update portfolio diversity for each asset
-                for asset in user_state.portfolio.assets.values_mut() {
-                    asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
-                }
+            // Update portfolio diversity for each asset
+            for asset in user_state.portfolio.assets.values_mut() {
+                asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
             }
 
-            state.orders.insert(order_id.clone(), new_order.clone());
+            // Store the order in Redis
+            let order_json = serde_json::to_string(&new_order).unwrap();
+            let _: () = con.set(order_id.clone(), order_json).await.unwrap();
+
+            // Update user state in Redis
+            let user_state_json = serde_json::to_string(&user_state).unwrap();
+            let _: () = con.set(&username, user_state_json).await.unwrap();
+
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
                 "user_id": new_order.user_id,
@@ -240,7 +262,6 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
         },
     }
 }
-
 
 async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
@@ -271,9 +292,13 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
         Ok(tx_id) => {
             info!("Sell order placed successfully");
             let order_id = Uuid::new_v4().to_string();
+            let mut con = state.redis_client.get_async_connection().await.unwrap();
+            let user_state_json: String = con.get(&username).await.unwrap();
+            let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
             let new_order = Order {
                 order_id: order_id.clone(),
-                user_id: state.users.get(&username).unwrap().user_id.clone(),
+                user_id: user_state.user_id.clone(),
                 symbol: order.symbol.clone(),
                 quantity: order.quantity,
                 price: order.price,
@@ -281,37 +306,29 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
             };
 
             // Update user's portfolio
-            let asset_to_update = {
-                let user_state = state.users.get_mut(&username).unwrap();
-                user_state.orders.push(new_order.clone());
-                user_state.transactions.push(Transaction {
-                    order_id: order_id.clone(),
-                    transaction_id: format!("{:?}", tx_id),
-                });
+            user_state.orders.push(new_order.clone());
+            user_state.transactions.push(Transaction {
+                order_id: order_id.clone(),
+                transaction_id: format!("{:?}", tx_id),
+            });
 
-                user_state.portfolio.assets.get_mut(&order.symbol).cloned()
-            };
-
-            if let Some(mut asset) = asset_to_update {
+            if let Some(mut asset) = user_state.portfolio.assets.get_mut(&order.symbol).cloned() {
                 if asset.shares >= order.quantity {
                     asset.shares -= order.quantity;
                     asset.market_value = asset.shares as f64 * order.price as f64;
 
-                    {
-                        let user_state = state.users.get_mut(&username).unwrap();
-                        user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
+                    user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
 
-                        // Update portfolio diversity for each asset
-                        for asset in user_state.portfolio.assets.values_mut() {
-                            asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
-                        }
+                    // Update portfolio diversity for each asset
+                    for asset in user_state.portfolio.assets.values_mut() {
+                        asset.portfolio_diversity = asset.market_value / user_state.portfolio.total_money;
+                    }
 
-                        // Remove asset if no shares are left
-                        if asset.shares == 0 {
-                            user_state.portfolio.assets.remove(&order.symbol);
-                        } else {
-                            user_state.portfolio.assets.insert(order.symbol.clone(), asset);
-                        }
+                    // Remove asset if no shares are left
+                    if asset.shares == 0 {
+                        user_state.portfolio.assets.remove(&order.symbol);
+                    } else {
+                        user_state.portfolio.assets.insert(order.symbol.clone(), asset);
                     }
                 } else {
                     return Ok(HttpResponse::BadRequest().body("Not enough shares to sell"));
@@ -320,7 +337,14 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
                 return Ok(HttpResponse::BadRequest().body("Asset not found in portfolio"));
             }
 
-            state.orders.insert(order_id.clone(), new_order.clone());
+            // Store the order in Redis
+            let order_json = serde_json::to_string(&new_order).unwrap();
+            let _: () = con.set(order_id.clone(), order_json).await.unwrap();
+
+            // Update user state in Redis
+            let user_state_json = serde_json::to_string(&user_state).unwrap();
+            let _: () = con.set(&username, user_state_json).await.unwrap();
+
             Ok(HttpResponse::Ok().json(json!({
                 "order_id": new_order.order_id,
                 "user_id": new_order.user_id,
@@ -337,51 +361,67 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
     }
 }
 
-
-
 async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
-    let state = data.lock().unwrap();
-    let orders: Vec<&Order> = state.orders.values().collect();
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let order_keys: Vec<String> = con.keys("*").await.unwrap();
+    let mut orders: Vec<Order> = Vec::new();
+
+    for key in order_keys {
+        if let Ok(order_json) = con.get::<String, String>(key).await {
+            if let Ok(order) = serde_json::from_str::<Order>(&order_json) {
+                orders.push(order);
+            }
+        }
+    }
+
     HttpResponse::Ok().json(orders)
 }
 
 async fn get_order_by_id(data: web::Data<Mutex<AppState>>, order_id: web::Path<String>) -> impl Responder {
-    let state = data.lock().unwrap();
-    if let Some(order) = state.orders.get(order_id.as_str()) {
-        HttpResponse::Ok().json(order)
-    } else {
-        HttpResponse::NotFound().body("Order not found")
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    if let Ok(order_json) = con.get::<String, String>(order_id.as_str().to_string()).await {
+        if let Ok(order) = serde_json::from_str::<Order>(&order_json) {
+            return HttpResponse::Ok().json(order);
+        }
     }
+
+    HttpResponse::NotFound().body("Order not found")
 }
 
 async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
-    let state = data.lock().unwrap();
-    let user_orders = &state.users.get(&username).unwrap().orders;
-    Ok(HttpResponse::Ok().json(user_orders))
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: String = con.get(&username).await.unwrap();
+    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
+    Ok(HttpResponse::Ok().json(user_state.orders))
 }
 
 async fn get_user_transactions(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
-    let state = data.lock().unwrap();
-    let user_transactions = &state.users.get(&username).unwrap().transactions;
-    Ok(HttpResponse::Ok().json(user_transactions))
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: String = con.get(&username).await.unwrap();
+    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
+    Ok(HttpResponse::Ok().json(user_state.transactions))
 }
 
 async fn get_user_portfolio(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
-    let state = data.lock().unwrap();
-    if let Some(user_state) = state.users.get(&username) {
-        if user_state.user_id == user_id.as_str() {
-            return Ok(HttpResponse::Ok().json(&user_state.portfolio));
-        }
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: String = con.get(&username).await.unwrap();
+    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
+    if user_state.user_id == user_id.as_str() {
+        return Ok(HttpResponse::Ok().json(&user_state.portfolio));
     }
+
     Ok(HttpResponse::Unauthorized().body("Invalid user ID"))
 }
 
@@ -391,17 +431,20 @@ async fn main() -> std::io::Result<()> {
 
     let transport = Http::new("http://localhost:8545").unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address = "0x58D2D2989ca205e3a518Cf950591E50730FBe002".parse().unwrap();
-    let account: H160 = "0xCa8161eab569Fe05EC3cA61E207aC0fB73C1Bebb".parse().unwrap();
+    let contract_address = "0x08eFcC84831174A37C4c210CBFB8bb909226DceB".parse().unwrap();
+    let account: H160 = "0xcd11210A972C4ee76A1340c242F46fB74F75c95b".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
+
+    let redis_client = redis::Client::open("redis://127.0.0.1/").expect("Invalid Redis URL");
 
     let state = web::Data::new(Mutex::new(AppState { 
         web3, 
         contract_address, 
         account, 
         secret,
-        users: HashMap::new(), // Initialize user state
-        orders: HashMap::new(), // Initialize order state
+        redis_client,
+        // users: HashMap::new(), // Initialize user state
+        // orders: HashMap::new(), // Initialize order state
     }));
 
     HttpServer::new(move || {
@@ -419,5 +462,5 @@ async fn main() -> std::io::Result<()> {
     })
     .bind("127.0.0.1:8080")?
     .run()
-    .await    
+    .await 
 }
