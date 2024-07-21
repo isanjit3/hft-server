@@ -977,6 +977,7 @@ dependencies = [
  "diesel",
  "dotenv",
  "env_logger",
+ "hex",
  "jsonwebtoken",
  "log",
  "r2d2",

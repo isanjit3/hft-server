@@ -173,6 +173,8 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
+    println!("Placing buy order for user: {}, order: {:?}", username, order);
+
     let mut state = data.lock().unwrap();
     
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
@@ -266,6 +268,8 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, ord
 async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, order: web::Json<OrderRequest>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
+
+    println!("Placing sell order for user: {}, order: {:?}", username, order);
 
     let mut state = data.lock().unwrap();
     
@@ -361,7 +365,84 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<Mutex<AppState>>, or
     }
 }
 
-async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
+async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
+    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
+    let username = token_data.claims.sub;
+
+    println!("Fetching orders for user: {}", user_id);
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: String = con.get(&username).await.unwrap();
+    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
+    if user_state.user_id == user_id.as_str() {
+        return Ok(HttpResponse::Ok().json(&user_state.orders));
+    }
+
+    Ok(HttpResponse::Unauthorized().body("Invalid user ID"))
+}
+
+async fn get_order_by_id(req: HttpRequest, data: web::Data<Mutex<AppState>>, order_id: web::Path<String>) -> Result<HttpResponse, Error> {
+    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
+    let username = token_data.claims.sub;
+
+    println!("Fetching order by ID: {}", order_id);
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    if let Ok(order_json) = con.get::<String, String>(order_id.to_string()).await {
+        if let Ok(order) = serde_json::from_str::<Order>(&order_json) {
+            return Ok(HttpResponse::Ok().json(order));
+        }
+    }
+
+    Ok(HttpResponse::NotFound().body("Order not found"))
+}
+
+async fn get_user_portfolio(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
+    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
+    let username = token_data.claims.sub;
+
+    println!("Fetching portfolio for user: {}", user_id);
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let user_state_json: String = con.get(&username).await.unwrap();
+    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
+
+    if user_state.user_id == user_id.as_str() {
+        return Ok(HttpResponse::Ok().json(&user_state.portfolio));
+    }
+
+    Ok(HttpResponse::Unauthorized().body("Invalid user ID"))
+}
+
+async fn get_portfolio_by_id(req: HttpRequest, data: web::Data<Mutex<AppState>>, portfolio_id: web::Path<String>) -> Result<HttpResponse, Error> {
+    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
+    let username = token_data.claims.sub;
+
+    println!("Fetching portfolio by ID: {}", portfolio_id);
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("*").await.unwrap();
+    
+    for key in keys {
+        if let Ok(user_state_json) = con.get::<String, String>(key.clone()).await {
+            if let Ok(user_state) = serde_json::from_str::<UserState>(&user_state_json) {
+                if user_state.portfolio.portfolio_id == portfolio_id.as_str() {
+                    return Ok(HttpResponse::Ok().json(user_state.portfolio));
+                }
+            }
+        }
+    }
+
+    Ok(HttpResponse::NotFound().body("Portfolio not found"))
+}
+
+async fn get_order_book(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
+    let username = token_data.claims.sub;
+
+    println!("Fetching order book");
+
     let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
     let order_keys: Vec<String> = con.keys("*").await.unwrap();
     let mut orders: Vec<Order> = Vec::new();
@@ -374,55 +455,20 @@ async fn get_order_book(data: web::Data<Mutex<AppState>>) -> impl Responder {
         }
     }
 
-    HttpResponse::Ok().json(orders)
-}
-
-async fn get_order_by_id(data: web::Data<Mutex<AppState>>, order_id: web::Path<String>) -> impl Responder {
-    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
-    if let Ok(order_json) = con.get::<String, String>(order_id.as_str().to_string()).await {
-        if let Ok(order) = serde_json::from_str::<Order>(&order_json) {
-            return HttpResponse::Ok().json(order);
-        }
-    }
-
-    HttpResponse::NotFound().body("Order not found")
-}
-
-async fn get_user_orders(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
-    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
-    let username = token_data.claims.sub;
-
-    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
-    let user_state_json: String = con.get(&username).await.unwrap();
-    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
-
-    Ok(HttpResponse::Ok().json(user_state.orders))
+    Ok(HttpResponse::Ok().json(orders))
 }
 
 async fn get_user_transactions(req: HttpRequest, data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
     let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
     let username = token_data.claims.sub;
 
+    println!("Fetching all transactions from the blockchain");
+
     let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
     let user_state_json: String = con.get(&username).await.unwrap();
     let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
     Ok(HttpResponse::Ok().json(user_state.transactions))
-}
-
-async fn get_user_portfolio(req: HttpRequest, data: web::Data<Mutex<AppState>>, user_id: web::Path<String>) -> Result<HttpResponse, Error> {
-    let token_data = validate_token(&req, &data.lock().unwrap().secret)?;
-    let username = token_data.claims.sub;
-
-    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
-    let user_state_json: String = con.get(&username).await.unwrap();
-    let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
-
-    if user_state.user_id == user_id.as_str() {
-        return Ok(HttpResponse::Ok().json(&user_state.portfolio));
-    }
-
-    Ok(HttpResponse::Unauthorized().body("Invalid user ID"))
 }
 
 #[actix_web::main]
@@ -454,13 +500,14 @@ async fn main() -> std::io::Result<()> {
             .route("/login", web::post().to(login_user))
             .route("/buy", web::post().to(place_buy_order))
             .route("/sell", web::post().to(place_sell_order))
-            .route("/orders", web::get().to(get_user_orders))
-            .route("/transactions", web::get().to(get_user_transactions))
-            .route("/portfolio/{user_id}", web::get().to(get_user_portfolio))
+            .route("/order/user/{user_id}", web::get().to(get_user_orders))
+            .route("/order/id/{order_id}", web::get().to(get_order_by_id))
+            .route("/portfolio/user/{user_id}", web::get().to(get_user_portfolio))
+            .route("/portfolio/id/{portfolio_id}", web::get().to(get_portfolio_by_id))
             .route("/order_book", web::get().to(get_order_book))
-            .route("/order/{order_id}", web::get().to(get_order_by_id))
+            .route("/transactions", web::get().to(get_user_transactions))
     })
     .bind("127.0.0.1:8080")?
     .run()
-    .await 
+    .await
 }
