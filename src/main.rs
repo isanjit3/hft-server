@@ -484,6 +484,8 @@ async fn get_all_users(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse,
         }
     }
 
+    println!("Getting {} users", users.len());
+
     Ok(HttpResponse::Ok().json(json!({
         "number_of_users": users.len(),
         "users": users,
@@ -502,6 +504,8 @@ async fn get_all_portfolios(data: web::Data<Mutex<AppState>>) -> Result<HttpResp
             }
         }
     }
+
+    println!("Getting {} portfolios", portfolios.len());
 
     Ok(HttpResponse::Ok().json(json!({
         "number_of_portfolios": portfolios.len(),
