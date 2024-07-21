@@ -471,6 +471,89 @@ async fn get_user_transactions(req: HttpRequest, data: web::Data<Mutex<AppState>
     Ok(HttpResponse::Ok().json(user_state.transactions))
 }
 
+async fn get_all_users(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("user:*").await.unwrap();
+
+    let mut users = Vec::new();
+    for key in keys {
+        if let Ok(user_json) = con.get::<String, String>(key).await {
+            if let Ok(user) = serde_json::from_str::<UserState>(&user_json) {
+                users.push(user);
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(json!({
+        "number_of_users": users.len(),
+        "users": users,
+    })))
+}
+
+async fn get_all_portfolios(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("portfolio:*").await.unwrap();
+
+    let mut portfolios = Vec::new();
+    for key in keys {
+        if let Ok(portfolio_json) = con.get::<String, String>(key).await {
+            if let Ok(portfolio) = serde_json::from_str::<Portfolio>(&portfolio_json) {
+                portfolios.push(portfolio);
+            }
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(json!({
+        "number_of_portfolios": portfolios.len(),
+        "portfolios": portfolios,
+    })))
+}
+
+async fn delete_all_data(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    println!("Deleting all data");
+
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let _: () = redis::cmd("FLUSHALL").query_async(&mut con).await.unwrap();
+    
+    Ok(HttpResponse::Ok().body("All data deleted"))
+}
+
+async fn delete_all_users(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("user:*").await.unwrap();
+    if !keys.is_empty() {
+        let _: () = con.del(keys.clone()).await.unwrap();
+    }
+    
+    println!("Deleting { } users", keys.len());
+
+    Ok(HttpResponse::Ok().body("All users deleted"))
+}
+
+async fn delete_all_orders(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("order:*").await.unwrap();
+    if !keys.is_empty() {
+        let _: () = con.del(keys.clone()).await.unwrap();
+    }
+
+    println!("Deleting { } orders", keys.len());
+    
+    Ok(HttpResponse::Ok().body("All orders deleted"))
+}
+
+async fn delete_all_portfolios(data: web::Data<Mutex<AppState>>) -> Result<HttpResponse, Error> {
+    let mut con = data.lock().unwrap().redis_client.get_async_connection().await.unwrap();
+    let keys: Vec<String> = con.keys("portfolio:*").await.unwrap();
+    if !keys.is_empty() {
+        let _: () = con.del(keys.clone()).await.unwrap();
+    }
+    
+    println!("Deleting { } portfolios", keys.len());
+
+    Ok(HttpResponse::Ok().body("All portfolios deleted"))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
@@ -496,6 +579,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
+            
+            // Application routes
             .route("/register", web::post().to(register_user))
             .route("/login", web::post().to(login_user))
             .route("/buy", web::post().to(place_buy_order))
@@ -504,8 +589,17 @@ async fn main() -> std::io::Result<()> {
             .route("/order/id/{order_id}", web::get().to(get_order_by_id))
             .route("/portfolio/user/{user_id}", web::get().to(get_user_portfolio))
             .route("/portfolio/id/{portfolio_id}", web::get().to(get_portfolio_by_id))
-            .route("/order_book", web::get().to(get_order_book))
             .route("/transactions", web::get().to(get_user_transactions))
+
+            // Utility routes
+            .route("utils/get/users", web::get().to(get_all_users))
+            .route("utils/get/orders", web::get().to(get_order_book))
+            .route("utils/get/portfolios", web::get().to(get_all_portfolios))
+            .route("utils/delete/all_data", web::delete().to(delete_all_data))
+            .route("utils/delete/users", web::delete().to(delete_all_users))
+            .route("utils/delete/orders", web::delete().to(delete_all_orders))
+            .route("utils/delete/portfolios", web::delete().to(delete_all_portfolios))
+
     })
     .bind("127.0.0.1:8080")?
     .run()
