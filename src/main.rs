@@ -20,6 +20,9 @@ use std::sync::Arc;
 // Redis imports
 use redis::AsyncCommands;
 
+use web3::types::{FilterBuilder, Log};
+use web3::futures::StreamExt;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
@@ -76,6 +79,14 @@ struct Portfolio {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+struct InitializeUserRequest {
+    username: String,
+    password: String,
+    total_money: f64,
+    assets: HashMap<String, Asset>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct Asset {
     symbol: String,
     shares: u32,
@@ -114,14 +125,11 @@ struct OrderMatchedEvent {
     seller: Address,
 }
 
-use web3::types::{FilterBuilder, Log};
-use web3::futures::StreamExt;
-
 async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
 
-    let contract_address: Address = "0x39ec4d1da3bc49634529cADeB200BFFD689d9fE0".parse().unwrap();
+    let contract_address: Address = "0x2bCF21C6146eD38807f16449387Ee0B0980Cc45d".parse().unwrap();
     let filter = FilterBuilder::default()
         .address(vec![contract_address])
         .build();
@@ -660,6 +668,40 @@ async fn get_all_portfolios(data: web::Data<AsyncMutex<AppState>>) -> Result<Htt
     })))
 }
 
+async fn initialize_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<InitializeUserRequest>) -> impl Responder {
+    println!("Initializing user: {:?}", user);
+
+    let hashed_password = match hash(&user.password, 4) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+    };
+    let user_id = Uuid::new_v4().to_string();
+    let portfolio_id = Uuid::new_v4().to_string();
+    let username = user.username.clone();
+    let mut state = data.lock().await;
+
+    let mut con = state.redis_client.get_async_connection().await.unwrap();
+    let user_state = UserState {
+        user_id: user_id.clone(),
+        username: username.clone(),
+        password: hashed_password.clone(),
+        orders: vec![],
+        transactions: vec![],
+        portfolio: Portfolio {
+            portfolio_id: portfolio_id.clone(),
+            total_money: user.total_money,
+            assets: user.assets.clone(),
+        },
+    };
+
+    let user_state_json = serde_json::to_string(&user_state).unwrap();
+    let _: () = con.set(&username, user_state_json).await.unwrap();
+
+    println!("User successfully initialized and saved to Redis with username: {}", username);
+
+    HttpResponse::Ok().json(user_state)
+}
+
 async fn delete_all_data(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
     println!("Deleting all data");
 
@@ -711,7 +753,7 @@ async fn main() -> std::io::Result<()> {
 
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address: H160 = "0xa19D66467d64e7b66A8E69D64adD56798BB2e658".parse().unwrap();
+    let contract_address: H160 = "0x2bCF21C6146eD38807f16449387Ee0B0980Cc45d".parse().unwrap();
     let account: H160 = "0xb193Edb4a3beFd1075707fEdd494eF5Dc8441f18".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
 
@@ -751,6 +793,7 @@ async fn main() -> std::io::Result<()> {
             .route("utils/get/users", web::get().to(get_all_users))
             .route("utils/get/orders", web::get().to(get_order_book))
             .route("utils/get/portfolios", web::get().to(get_all_portfolios))
+            .route("utils/post/initialize_user", web::post().to(initialize_user))
             .route("utils/delete/all_data", web::delete().to(delete_all_data))
             .route("utils/delete/users", web::delete().to(delete_all_users))
             .route("utils/delete/orders", web::delete().to(delete_all_orders))
