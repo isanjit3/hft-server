@@ -75,7 +75,7 @@ print("Initialized User 1")
 assets_user2 = {
     "AAPL": {
         "symbol": "AAPL",
-        "shares": 10,
+        "shares": 15,
         "market_value": 1500.0,
         "average_cost": 150.0,
         "portfolio_diversity": 1.0
@@ -104,11 +104,11 @@ print("User 1 Portfolio Before Transaction:", json.dumps(portfolio_user1_before,
 portfolio_user2_before = get_user_portfolio(token_user2, user_id2)
 print("User 2 Portfolio Before Transaction:", json.dumps(portfolio_user2_before, indent=4))
 
-# User 1 places a buy order for AAPL
-buy_order = place_buy_order(token_user1, "AAPL", 10, 150)
+# User 1 places a buy order for AAPL with a larger quantity
+buy_order = place_buy_order(token_user1, "AAPL", 15, 150)
 print("User 1 Buy Order:", buy_order)
 
-# User 2 places a sell order for AAPL
+# User 2 places a sell order for AAPL with a smaller quantity
 sell_order = place_sell_order(token_user2, "AAPL", 10, 150)
 print("User 2 Sell Order:", sell_order)
 
@@ -119,3 +119,15 @@ print("User 1 Portfolio After Transaction:", json.dumps(portfolio_user1_after, i
 # Display User 2 Portfolio after transaction
 portfolio_user2_after = get_user_portfolio(token_user2, user_id2)
 print("User 2 Portfolio After Transaction:", json.dumps(portfolio_user2_after, indent=4))
+
+# User 2 places another sell order for AAPL with the remaining quantity
+sell_order2 = place_sell_order(token_user2, "AAPL", 5, 150)
+print("User 2 Second Sell Order:", sell_order2)
+
+# Display User 1 Portfolio after the second transaction
+portfolio_user1_after_second = get_user_portfolio(token_user1, user_id1)
+print("User 1 Portfolio After Second Transaction:", json.dumps(portfolio_user1_after_second, indent=4))
+
+# Display User 2 Portfolio after the second transaction
+portfolio_user2_after_second = get_user_portfolio(token_user2, user_id2)
+print("User 2 Portfolio After Second Transaction:", json.dumps(portfolio_user2_after_second, indent=4))

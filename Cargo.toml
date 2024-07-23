@@ -20,3 +20,5 @@ chrono = { version = "0.4", features = ["serde"] }
 redis = { version = "0.25.4", features = ["aio", "tokio-comp"] }
 hex = "0.4.3"
 tokio = { version = "1.38.1", features = ["full"] }
+ethabi = "18.0.0"
+futures = "0.3.30"
