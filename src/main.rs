@@ -1,10 +1,8 @@
 use actix_web::{web, App, HttpServer, Responder, HttpResponse, HttpRequest, Error};
 use actix_web::middleware::Logger;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
 use std::collections::HashMap;
 use web3::contract::{Contract, Options};
-use web3::transports::Http;
 use web3::types::{Address, H160, U256};
 use log::{info, error};
 use serde_json::Value;
@@ -12,16 +10,11 @@ use serde_json::json;
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey, TokenData};
 use bcrypt::{hash, verify};
 use uuid::Uuid;
-use tokio::spawn;
 use tokio::sync::Mutex as AsyncMutex;
-use web3::transports::WebSocket;
-use std::sync::Arc;
 
 // Redis imports
 use redis::AsyncCommands;
 
-use web3::types::{FilterBuilder, Log};
-use web3::futures::StreamExt;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -55,7 +48,7 @@ struct Order {
     symbol: String,
     quantity: u32,
     price: u32,
-    order_type: String, // Add order_type field
+    order_type: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -101,7 +94,6 @@ struct AppState {
     account: H160,
     secret: String,
     redis_client: redis::Client,
-    users: HashMap<String, UserState>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -114,151 +106,6 @@ struct UserState {
     portfolio: Portfolio,
 }
 
-#[derive(Deserialize)]
-struct OrderMatchedEvent {
-    buy_order_id: U256,
-    sell_order_id: U256,
-    symbol: String,
-    quantity: U256,
-    price: U256,
-    buyer: Address,
-    seller: Address,
-}
-
-/*
-async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
-    let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
-    let web3 = web3::Web3::new(transport);
-
-    let contract_address: Address = "0x2bCF21C6146eD38807f16449387Ee0B0980Cc45d".parse().unwrap();
-    let filter = FilterBuilder::default()
-        .address(vec![contract_address])
-        .build();
-
-    let mut event_stream = web3.eth_subscribe().subscribe_logs(filter).await.unwrap();
-
-    /*
-    while let Some(log) = event_stream.next().await {
-        match log {
-            Ok(log) => {
-                if let Ok(event) = parse_log(log) {
-                    handle_event(data.clone(), event).await;
-                }
-            }
-            Err(e) => {
-                eprintln!("Error receiving log: {:?}", e);
-            }
-        }
-    }*/
-}
-
-fn parse_log(log: Log) -> Result<OrderMatchedEvent, web3::Error> {
-    // Parse the log into OrderMatchedEvent
-    let event: OrderMatchedEvent = serde_json::from_slice(&log.data.0)?;
-    Ok(event)
-}
-
-async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatchedEvent) {
-    /*
-    let mut state = data.lock().await;
-    let mut con = state.redis_client.get_async_connection().await.unwrap();
-
-    // Update buyer's portfolio
-    if let Ok(buyer_state_json) = con.get::<String, String>(event.buyer.to_string()).await {
-        let mut buyer_state: UserState = serde_json::from_str(&buyer_state_json).unwrap();
-        // Debugging output
-        println!("Buyer portfolio before update: {:?}", buyer_state.portfolio);
-
-        // Update buyer's portfolio
-        let asset = buyer_state.portfolio.assets.entry(event.symbol.clone()).or_insert(Asset {
-            symbol: event.symbol.clone(),
-            shares: 0,
-            market_value: 0.0,
-            average_cost: 0.0,
-            portfolio_diversity: 0.0,
-        });
-
-        let total_cost = asset.shares as f64 * asset.average_cost;
-        let new_total_cost = total_cost + event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
-        asset.shares += event.quantity.as_u64() as u32;
-        asset.average_cost = new_total_cost / asset.shares as f64;
-        asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
-
-        buyer_state.portfolio.total_money -= event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
-
-        // Update portfolio diversity for each asset
-        for asset in buyer_state.portfolio.assets.values_mut() {
-            asset.portfolio_diversity = asset.market_value / buyer_state.portfolio.total_money;
-        }
-
-        // Debugging output
-        println!("Buyer portfolio after update: {:?}", buyer_state.portfolio);
-
-        let updated_buyer_state_json = serde_json::to_string(&buyer_state).unwrap();
-        let _: () = con.set(event.buyer.to_string(), updated_buyer_state_json).await.unwrap();
-    }
-
-    // Update seller's portfolio
-    if let Ok(seller_state_json) = con.get::<String, String>(event.seller.to_string()).await {
-        let mut seller_state: UserState = serde_json::from_str(&seller_state_json).unwrap();
-        // Debugging output
-        println!("Seller portfolio before update: {:?}", seller_state.portfolio);
-
-        // Update seller's portfolio
-        if let Some(mut asset) = seller_state.portfolio.assets.get_mut(&event.symbol).cloned() {
-            if asset.shares >= event.quantity.as_u64() as u32 {
-                asset.shares -= event.quantity.as_u64() as u32;
-                asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
-
-                seller_state.portfolio.total_money += event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
-
-                // Update portfolio diversity for each asset
-                for asset in seller_state.portfolio.assets.values_mut() {
-                    asset.portfolio_diversity = asset.market_value / seller_state.portfolio.total_money;
-                }
-
-                // Remove asset if no shares are left
-                if asset.shares == 0 {
-                    seller_state.portfolio.assets.remove(&event.symbol);
-                } else {
-                    seller_state.portfolio.assets.insert(event.symbol.clone(), asset);
-                }
-
-                // Debugging output
-                println!("Seller portfolio after update: {:?}", seller_state.portfolio);
-
-                let updated_seller_state_json = serde_json::to_string(&seller_state).unwrap();
-                let _: () = con.set(event.seller.to_string(), updated_seller_state_json).await.unwrap();
-            }
-        }
-    }
-
-    // Update order book
-    let buy_order_key = format!("buy_order:{}", event.buy_order_id);
-    let sell_order_key = format!("sell_order:{}", event.sell_order_id);
-
-    let buy_order: Order = serde_json::from_str(&con.get::<String, String>(buy_order_key.clone()).await.unwrap()).unwrap();
-    let sell_order: Order = serde_json::from_str(&con.get::<String, String>(sell_order_key.clone()).await.unwrap()).unwrap();
-
-    // Remove matched orders from order book
-    let _: () = con.del(buy_order_key).await.unwrap();
-    let _: () = con.del(sell_order_key).await.unwrap();
-
-    // Add matched order to order history
-    let matched_order = json!({
-        "buy_order_id": event.buy_order_id,
-        "sell_order_id": event.sell_order_id,
-        "symbol": event.symbol,
-        "quantity": event.quantity.as_u64(),
-        "price": event.price.as_u64(),
-        "buyer": event.buyer,
-        "seller": event.seller
-    });
-
-    let _: () = con.rpush("order_history", serde_json::to_string(&matched_order).unwrap()).await.unwrap();*/
-    return;
-} */
-
 async fn register_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<RegisterUser>) -> impl Responder {
     println!("Registering user: {:?}", user);
 
@@ -269,9 +116,9 @@ async fn register_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<Re
     let user_id = Uuid::new_v4().to_string();
     let portfolio_id = Uuid::new_v4().to_string();
     let username = user.username.clone();
-    let mut state = data.lock().await;
+    let state = data.lock().await;
 
-    let mut con = state.redis_client.get_async_connection().await.unwrap();
+    let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state = UserState {
         user_id: user_id.clone(),
         username: username.clone(),
@@ -301,8 +148,8 @@ async fn register_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<Re
 async fn login_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<LoginUser>) -> impl Responder {
     println!("Logging in user: {:?}", user);
 
-    let mut state = data.lock().await;
-    let mut con = state.redis_client.get_async_connection().await.unwrap();
+    let state = data.lock().await;
+    let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state_json: Option<String> = con.get(&user.username).await.unwrap();
 
     if let Some(user_state_json) = user_state_json {
@@ -346,7 +193,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
 
     println!("Placing buy order for user: {}, order: {:?}", username, order);
 
-    let mut state = data.lock().await;
+    let state = data.lock().await;
     
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
@@ -371,7 +218,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
         Ok(tx_id) => {
             info!("Buy order placed successfully");
             let order_id = Uuid::new_v4().to_string();
-            let mut con = state.redis_client.get_async_connection().await.unwrap();
+            let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
             let user_state_json: String = con.get(&username).await.unwrap();
             let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
@@ -442,7 +289,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>
 
     println!("Placing sell order for user: {}, order: {:?}", username, order);
 
-    let mut state = data.lock().await;
+    let state = data.lock().await;
     
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
@@ -467,7 +314,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>
         Ok(tx_id) => {
             info!("Sell order placed successfully");
             let order_id = Uuid::new_v4().to_string();
-            let mut con = state.redis_client.get_async_connection().await.unwrap();
+            let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
             let user_state_json: String = con.get(&username).await.unwrap();
             let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
@@ -542,7 +389,7 @@ async fn get_user_orders(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
 
     println!("Fetching orders for user: {}", user_id);
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state_json: String = con.get(&username).await.unwrap();
     let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
@@ -554,12 +401,11 @@ async fn get_user_orders(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
 }
 
 async fn get_order_by_id(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>, order_id: web::Path<String>) -> Result<HttpResponse, Error> {
-    let token_data = validate_token(&req, &data.lock().await.secret)?;
-    let username = token_data.claims.sub;
+    let _token_data = validate_token(&req, &data.lock().await.secret)?;
 
     println!("Fetching order by ID: {}", order_id);
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     if let Ok(order_json) = con.get::<String, String>(order_id.to_string()).await {
         if let Ok(order) = serde_json::from_str::<Order>(&order_json) {
             return Ok(HttpResponse::Ok().json(order));
@@ -575,7 +421,7 @@ async fn get_user_portfolio(req: HttpRequest, data: web::Data<AsyncMutex<AppStat
 
     println!("Fetching portfolio for user: {}", user_id);
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state_json: String = con.get(&username).await.unwrap();
     let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
@@ -587,12 +433,11 @@ async fn get_user_portfolio(req: HttpRequest, data: web::Data<AsyncMutex<AppStat
 }
 
 async fn get_portfolio_by_id(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>, portfolio_id: web::Path<String>) -> Result<HttpResponse, Error> {
-    let token_data = validate_token(&req, &data.lock().await.secret)?;
-    let username = token_data.claims.sub;
+    let _token_data = validate_token(&req, &data.lock().await.secret)?;
 
     println!("Fetching portfolio by ID: {}", portfolio_id);
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("*").await.unwrap();
     
     for key in keys {
@@ -609,12 +454,11 @@ async fn get_portfolio_by_id(req: HttpRequest, data: web::Data<AsyncMutex<AppSta
 }
 
 async fn get_order_book(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let token_data = validate_token(&req, &data.lock().await.secret)?;
-    let username = token_data.claims.sub;
+    let _token_data = validate_token(&req, &data.lock().await.secret)?;
 
     println!("Fetching order book");
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let order_keys: Vec<String> = con.keys("*").await.unwrap();
     let mut orders: Vec<Order> = Vec::new();
 
@@ -635,7 +479,7 @@ async fn get_user_transactions(req: HttpRequest, data: web::Data<AsyncMutex<AppS
 
     println!("Fetching all transactions from the blockchain");
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state_json: String = con.get(&username).await.unwrap();
     let user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
 
@@ -643,7 +487,7 @@ async fn get_user_transactions(req: HttpRequest, data: web::Data<AsyncMutex<AppS
 }
 
 async fn get_all_users(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("*").await.unwrap();
 
     let mut users = Vec::new();
@@ -664,7 +508,7 @@ async fn get_all_users(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResp
 }
 
 async fn get_all_portfolios(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("*").await.unwrap();
 
     let mut portfolios = Vec::new();
@@ -694,9 +538,9 @@ async fn initialize_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<
     let user_id = Uuid::new_v4().to_string();
     let portfolio_id = Uuid::new_v4().to_string();
     let username = user.username.clone();
-    let mut state = data.lock().await;
+    let state = data.lock().await;
 
-    let mut con = state.redis_client.get_async_connection().await.unwrap();
+    let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
     let user_state = UserState {
         user_id: user_id.clone(),
         username: username.clone(),
@@ -721,14 +565,14 @@ async fn initialize_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<
 async fn delete_all_data(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
     println!("Deleting all data");
 
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let _: () = redis::cmd("FLUSHALL").query_async(&mut con).await.unwrap();
     
     Ok(HttpResponse::Ok().body("All data deleted"))
 }
 
 async fn delete_all_users(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("user:*").await.unwrap();
     if !keys.is_empty() {
         let _: () = con.del(keys.clone()).await.unwrap();
@@ -740,7 +584,7 @@ async fn delete_all_users(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpR
 }
 
 async fn delete_all_orders(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("order:*").await.unwrap();
     if !keys.is_empty() {
         let _: () = con.del(keys.clone()).await.unwrap();
@@ -752,7 +596,7 @@ async fn delete_all_orders(data: web::Data<AsyncMutex<AppState>>) -> Result<Http
 }
 
 async fn delete_all_portfolios(data: web::Data<AsyncMutex<AppState>>) -> Result<HttpResponse, Error> {
-    let mut con = data.lock().await.redis_client.get_async_connection().await.unwrap();
+    let mut con = data.lock().await.redis_client.get_multiplexed_async_connection().await.unwrap();
     let keys: Vec<String> = con.keys("portfolio:*").await.unwrap();
     if !keys.is_empty() {
         let _: () = con.del(keys.clone()).await.unwrap();
@@ -781,14 +625,7 @@ async fn main() -> std::io::Result<()> {
         account, 
         secret,
         redis_client,
-        users: HashMap::new(), // Initialize users field
     }));
-
-    /*
-    let listen_data = state.clone();
-    tokio::spawn(async move {
-        listen_for_events(listen_data).await;
-    }); */
 
     HttpServer::new(move || {
         App::new()
