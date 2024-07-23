@@ -125,6 +125,7 @@ struct OrderMatchedEvent {
     seller: Address,
 }
 
+/*
 async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
@@ -136,6 +137,7 @@ async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
 
     let mut event_stream = web3.eth_subscribe().subscribe_logs(filter).await.unwrap();
 
+    /*
     while let Some(log) = event_stream.next().await {
         match log {
             Ok(log) => {
@@ -147,7 +149,7 @@ async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
                 eprintln!("Error receiving log: {:?}", e);
             }
         }
-    }
+    }*/
 }
 
 fn parse_log(log: Log) -> Result<OrderMatchedEvent, web3::Error> {
@@ -157,12 +159,16 @@ fn parse_log(log: Log) -> Result<OrderMatchedEvent, web3::Error> {
 }
 
 async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatchedEvent) {
+    /*
     let mut state = data.lock().await;
     let mut con = state.redis_client.get_async_connection().await.unwrap();
 
     // Update buyer's portfolio
     if let Ok(buyer_state_json) = con.get::<String, String>(event.buyer.to_string()).await {
         let mut buyer_state: UserState = serde_json::from_str(&buyer_state_json).unwrap();
+        // Debugging output
+        println!("Buyer portfolio before update: {:?}", buyer_state.portfolio);
+
         // Update buyer's portfolio
         let asset = buyer_state.portfolio.assets.entry(event.symbol.clone()).or_insert(Asset {
             symbol: event.symbol.clone(),
@@ -178,12 +184,15 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
         asset.average_cost = new_total_cost / asset.shares as f64;
         asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
 
-        buyer_state.portfolio.total_money += event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
+        buyer_state.portfolio.total_money -= event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
 
         // Update portfolio diversity for each asset
         for asset in buyer_state.portfolio.assets.values_mut() {
             asset.portfolio_diversity = asset.market_value / buyer_state.portfolio.total_money;
         }
+
+        // Debugging output
+        println!("Buyer portfolio after update: {:?}", buyer_state.portfolio);
 
         let updated_buyer_state_json = serde_json::to_string(&buyer_state).unwrap();
         let _: () = con.set(event.buyer.to_string(), updated_buyer_state_json).await.unwrap();
@@ -192,13 +201,16 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
     // Update seller's portfolio
     if let Ok(seller_state_json) = con.get::<String, String>(event.seller.to_string()).await {
         let mut seller_state: UserState = serde_json::from_str(&seller_state_json).unwrap();
+        // Debugging output
+        println!("Seller portfolio before update: {:?}", seller_state.portfolio);
+
         // Update seller's portfolio
         if let Some(mut asset) = seller_state.portfolio.assets.get_mut(&event.symbol).cloned() {
             if asset.shares >= event.quantity.as_u64() as u32 {
                 asset.shares -= event.quantity.as_u64() as u32;
                 asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
 
-                seller_state.portfolio.total_money -= event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
+                seller_state.portfolio.total_money += event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
 
                 // Update portfolio diversity for each asset
                 for asset in seller_state.portfolio.assets.values_mut() {
@@ -211,6 +223,9 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
                 } else {
                     seller_state.portfolio.assets.insert(event.symbol.clone(), asset);
                 }
+
+                // Debugging output
+                println!("Seller portfolio after update: {:?}", seller_state.portfolio);
 
                 let updated_seller_state_json = serde_json::to_string(&seller_state).unwrap();
                 let _: () = con.set(event.seller.to_string(), updated_seller_state_json).await.unwrap();
@@ -240,8 +255,9 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
         "seller": event.seller
     });
 
-    let _: () = con.rpush("order_history", serde_json::to_string(&matched_order).unwrap()).await.unwrap();
-}
+    let _: () = con.rpush("order_history", serde_json::to_string(&matched_order).unwrap()).await.unwrap();*/
+    return;
+} */
 
 async fn register_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<RegisterUser>) -> impl Responder {
     println!("Registering user: {:?}", user);
@@ -389,7 +405,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
             asset.average_cost = new_total_cost / asset.shares as f64;
             asset.market_value = asset.shares as f64 * order.price as f64;
 
-            user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
+            user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
 
             // Update portfolio diversity for each asset
             for asset in user_state.portfolio.assets.values_mut() {
@@ -476,7 +492,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>
                     asset.shares -= order.quantity;
                     asset.market_value = asset.shares as f64 * order.price as f64;
 
-                    user_state.portfolio.total_money -= order.quantity as f64 * order.price as f64;
+                    user_state.portfolio.total_money += order.quantity as f64 * order.price as f64;
 
                     // Update portfolio diversity for each asset
                     for asset in user_state.portfolio.assets.values_mut() {
@@ -768,10 +784,11 @@ async fn main() -> std::io::Result<()> {
         users: HashMap::new(), // Initialize users field
     }));
 
+    /*
     let listen_data = state.clone();
     tokio::spawn(async move {
         listen_for_events(listen_data).await;
-    });
+    }); */
 
     HttpServer::new(move || {
         App::new()

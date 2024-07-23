@@ -62,9 +62,14 @@ def get_user_portfolio(token, user_id):
     response = requests.get(url, headers=headers)
     return response.json()
 
+# Delete all data
+delete_all_data_url = f"{BASE_URL}/utils/delete/all_data"
+response = requests.delete(delete_all_data_url)
+print("Deleted all data")
+
 # Initialize User 1 with money and no assets
 user1 = initialize_user("user1", "password123", 10000.0, {})
-print("Initialized User 1:", user1)
+print("Initialized User 1")
 
 # Initialize User 2 with assets and no money
 assets_user2 = {
@@ -77,19 +82,19 @@ assets_user2 = {
     }
 }
 user2 = initialize_user("user2", "password123", 0.0, assets_user2)
-print("Initialized User 2:", user2)
+print("Initialized User 2")
 
 # Login User 1
 login_user1 = login_user("user1", "password123")
 token_user1 = login_user1.get("token")
 user_id1 = login_user1.get("user_id")
-print("User 1 Login Token:", token_user1)
+print("User 1 Logged in")
 
 # Login User 2
 login_user2 = login_user("user2", "password123")
 token_user2 = login_user2.get("token")
 user_id2 = login_user2.get("user_id")
-print("User 2 Login Token:", token_user2)
+print("User 2 Logged in")
 
 # Display User 1 Portfolio before transaction
 portfolio_user1_before = get_user_portfolio(token_user1, user_id1)
