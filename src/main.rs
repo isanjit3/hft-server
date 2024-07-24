@@ -340,7 +340,7 @@ async fn register_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<Re
     }))
 }
 
-async fn login_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<LoginUser>) -> impl Responder {
+async fn login(data: web::Data<AsyncMutex<AppState>>, user: web::Json<LoginUser>) -> impl Responder {
     println!("Logging in user: {:?}", user);
 
     let state = data.lock().await;
@@ -369,6 +369,15 @@ async fn login_user(data: web::Data<AsyncMutex<AppState>>, user: web::Json<Login
         println!("User not found in Redis");
     }
     HttpResponse::Unauthorized().body("Invalid username or password")
+}
+
+async fn signout(req: HttpRequest) -> impl Responder {
+    // Invalidate the token or clear the client-side storage of the token
+    // Since JWT is stateless, just a response indicating the sign-out is enough
+    println!("User signed out");
+    HttpResponse::Ok().json(json!({
+        "message": "Successfully signed out"
+    }))
 }
 
 fn validate_token(req: &HttpRequest, secret: &str) -> Result<TokenData<Claims>, Error> {
@@ -837,7 +846,8 @@ async fn main() -> std::io::Result<()> {
 
             // Application routes
             .route("/register", web::post().to(register_user))
-            .route("/login", web::post().to(login_user))
+            .route("/login", web::post().to(login))
+            .route("/signout", web::post().to(signout))
             .route("/buy", web::post().to(place_buy_order))
             .route("/sell", web::post().to(place_sell_order))
             .route("/order/user/{user_id}", web::get().to(get_user_orders))
