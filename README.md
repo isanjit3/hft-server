@@ -38,11 +38,10 @@ Welcome to the High-Frequency Trading Server! This project is designed to simula
 3. **Set Up Environment Variables**
     - Create a `.env` file with the necessary environment variables:
         ```env
-        WEB3_PROVIDER_URL=<your_web3_provider_url>
+        WS_URLL=<your_web3_provider_url>
         CONTRACT_ADDRESS=<your_contract_address>
-        ACCOUNT_ADDRESS=<your_account_address>
-        PRIVATE_KEY=<your_private_key>
-        REDIS_URL=<your_redis_url>
+        ACCOUNT=<your_account_address>
+        REDIS_CLIENT_URL=<your_redis_url>
         SECRET_KEY=<your_secret_key>
         ```
 
