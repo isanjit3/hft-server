@@ -113,5 +113,5 @@ For any questions or suggestions, feel free to open an issue or contact us at [i
 
 ---
 
-Made with ❤️ by [Sanjit Thangarasu]
+Made with ❤️ by Sanjit Thangarasu
 
