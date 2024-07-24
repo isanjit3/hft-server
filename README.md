@@ -106,12 +106,12 @@ Welcome to the High-Frequency Trading Server! This project is designed to simula
 4. **User Interface**: Develop a frontend for better user interaction.
 
 ## 👥 Contributors
-- **Your Name**: [GitHub](https://github.com/your-profile)
-- **Contributor 2**: [GitHub](https://github.com/contributor-profile)
+- **Sanjit Thangarasu**: [GitHub](https://github.com/isanjit3) | [Website](https://sanjit.app)
 
 ## 📞 Contact
-For any questions or suggestions, feel free to open an issue or contact us at [your-email@example.com](mailto:your-email@example.com).
+For any questions or suggestions, feel free to open an issue or contact us at [isanjit3@gmail.com](mailto:isanjit3@gmail.com).
 
 ---
 
-Made with ❤️ by [Your Name]
+Made with ❤️ by [Sanjit Thangarasu]
+
