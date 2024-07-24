@@ -175,6 +175,31 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
     let state = data.lock().await;
     let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
 
+    // Update order book
+    let buy_order_key = format!("buy_order:{}", event.buy_order_id);
+    let sell_order_key = format!("sell_order:{}", event.sell_order_id);
+
+    // Remove matched orders from order book
+    let _: () = con.del(buy_order_key).await.unwrap();
+    let _: () = con.del(sell_order_key).await.unwrap();
+
+    // Add matched order to order history
+    let matched_order = json!({
+        "buy_order_id": event.buy_order_id,
+        "sell_order_id": event.sell_order_id,
+        "symbol": event.symbol,
+        "quantity": event.quantity.as_u64(),
+        "price": event.price.as_u64(),
+        "buyer": event.buyer,
+        "buyer_user_id": event.buyer_user_id,
+        "buyer_order_id": event.buyer_order_id,
+        "seller": event.seller,
+        "seller_user_id": event.seller_user_id,
+        "seller_order_id": event.seller_order_id
+    });
+
+    let _: () = con.rpush("order_history", serde_json::to_string(&matched_order).unwrap()).await.unwrap();
+
     // Update buyer's portfolio
     if let Ok(buyer_state_json) = con.get::<String, String>(event.buyer_user_id.clone()).await {
         println!("Updating buyer's portfolio for buyer: {:?}", event.buyer);
@@ -193,6 +218,11 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
         asset.shares += event.quantity.as_u64() as u32;
         asset.average_cost = new_total_cost / asset.shares as f64;
         asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
+
+        // Print event quantity and price as u64
+        println!("Event quantity as u64: {:?}", event.quantity.as_u64());
+        println!("Event price as u64: {:?}", event.price);
+        println!("Buyer money {:?}", buyer_state.portfolio.total_money);
 
         buyer_state.portfolio.total_money -= event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
 
@@ -216,6 +246,11 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
                 asset.shares -= event.quantity.as_u64() as u32;
                 asset.market_value = asset.shares as f64 * event.price.as_u64() as f64;
 
+                // Print event quantity and price as u64
+                println!("Event quantity as u64: {:?}", event.quantity.as_u64());
+                println!("Event price as u64: {:?}", event.price);
+                println!("Seller money {:?}", seller_state.portfolio.total_money);
+
                 seller_state.portfolio.total_money += event.quantity.as_u64() as f64 * event.price.as_u64() as f64;
 
                 for asset in seller_state.portfolio.assets.values_mut() {
@@ -236,34 +271,6 @@ async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatched
         }
     }
 
-    // Update order book
-    let buy_order_key = format!("buy_order:{}", event.buy_order_id);
-    let sell_order_key = format!("sell_order:{}", event.sell_order_id);
-
-    // let buy_order: Order = serde_json::from_str(&con.get::<String, String>(buy_order_key.clone()).await.unwrap()).unwrap();
-    // let sell_order: Order = serde_json::from_str(&con.get::<String, String>(sell_order_key.clone()).await.unwrap()).unwrap();
-
-    // Remove matched orders from order book
-    let _: () = con.del(buy_order_key).await.unwrap();
-    let _: () = con.del(sell_order_key).await.unwrap();
-
-    // Add matched order to order history
-    let matched_order = json!({
-        "buy_order_id": event.buy_order_id,
-        "sell_order_id": event.sell_order_id,
-        "symbol": event.symbol,
-        "quantity": event.quantity.as_u64(),
-        "price": event.price.as_u64(),
-        "buyer": event.buyer,
-        "buyer_user_id": event.buyer_user_id,
-        "buyer_order_id": event.buyer_order_id,
-        "seller": event.seller,
-        "seller_user_id": event.seller_user_id,
-        "seller_order_id": event.seller_order_id
-    });
-
-    let _: () = con.rpush("order_history", serde_json::to_string(&matched_order).unwrap()).await.unwrap();
-
     println!("Order matched and portfolios updated: buyer = {:?}, seller = {:?}", event.buyer, event.seller);
 }
 
@@ -271,7 +278,7 @@ async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
 
-    let contract_address: Address = "0xB4AaFED11a2FbB6E049AA1266a95191703c8BEC2".parse().unwrap();
+    let contract_address: Address = "0x0b1dDfF81286a9584b51d81acA40Edd29DF91a7D".parse().unwrap();
     let filter = FilterBuilder::default()
         .address(vec![contract_address])
         .build();
@@ -799,7 +806,7 @@ async fn main() -> std::io::Result<()> {
 
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address: H160 = "0xB4AaFED11a2FbB6E049AA1266a95191703c8BEC2".parse().unwrap();
+    let contract_address: H160 = "0x0b1dDfF81286a9584b51d81acA40Edd29DF91a7D".parse().unwrap();
     let account: H160 = "0xb193Edb4a3beFd1075707fEdd494eF5Dc8441f18".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
 
