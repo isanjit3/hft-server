@@ -13,6 +13,8 @@ use uuid::Uuid;
 use tokio::sync::Mutex as AsyncMutex;
 use ethabi;
 use futures::stream::StreamExt;
+use dotenv::dotenv;
+use std::env;
 
 // Redis imports
 use redis::AsyncCommands;
@@ -278,7 +280,7 @@ async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
 
-    let contract_address: Address = "0x0b1dDfF81286a9584b51d81acA40Edd29DF91a7D".parse().unwrap();
+    let contract_address: H160 = env::var("CONTRACT_ADDRESS").expect("CONTRACT_ADDRESS not set in .env file").parse().expect("Invalid contract address");
     let filter = FilterBuilder::default()
         .address(vec![contract_address])
         .build();
@@ -802,15 +804,18 @@ async fn delete_all_portfolios(data: web::Data<AsyncMutex<AppState>>) -> Result<
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
-    let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
-    let web3 = web3::Web3::new(transport);
-    let contract_address: H160 = "0x0b1dDfF81286a9584b51d81acA40Edd29DF91a7D".parse().unwrap();
-    let account: H160 = "0xb193Edb4a3beFd1075707fEdd494eF5Dc8441f18".parse().unwrap();
-    let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
+    let ws_url = env::var("WS_URL").expect("WS_URL not set in .env file");
+    let contract_address: H160 = env::var("CONTRACT_ADDRESS").expect("CONTRACT_ADDRESS not set in .env file").parse().expect("Invalid contract address");
+    let account: H160 = env::var("ACCOUNT_ADDRESS").expect("ACCOUNT_ADDRESS not set in .env file").parse().expect("Invalid account address");
+    let secret = env::var("SECRET_KEY").expect("SECRET_KEY not set in .env file");
+    let redis_url = env::var("REDIS_CLIENT_URL").expect("REDIS_CLIENT_URL not set in .env file");
 
-    let redis_client = redis::Client::open("redis://127.0.0.1/").expect("Invalid Redis URL");
+    let transport = web3::transports::WebSocket::new(&ws_url).await.unwrap();
+    let web3 = web3::Web3::new(transport);
+    let redis_client = redis::Client::open(redis_url).expect("Invalid Redis URL");
 
     let state = web::Data::new(AsyncMutex::new(AppState { 
         web3: web3.clone(), 
