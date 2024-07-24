@@ -41,6 +41,31 @@ struct User {
     username: String,
     password: String,
 }
+#[derive(Deserialize, Serialize, Debug, Clone)]
+enum OrderType {
+    Limit,
+    Market,
+    Stop,
+}
+
+impl OrderType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            OrderType::Limit => "limit",
+            OrderType::Market => "market",
+            OrderType::Stop => "stop",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "limit" => Some(OrderType::Limit),
+            "market" => Some(OrderType::Market),
+            "stop" => Some(OrderType::Stop),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct Order {
@@ -57,6 +82,7 @@ struct OrderRequest {
     symbol: String,
     quantity: u32,
     price: u32,
+    order_type: OrderType,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -146,7 +172,7 @@ fn parse_log(log: Log) -> Result<OrderMatchedEvent, web3::Error> {
 async fn handle_event(data: web::Data<AsyncMutex<AppState>>, event: OrderMatchedEvent) {
     println!("Order matched event received: {:?}", event);
 
-    let mut state = data.lock().await;
+    let state = data.lock().await;
     let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
 
     // Update buyer's portfolio
@@ -245,7 +271,7 @@ async fn listen_for_events(data: web::Data<AsyncMutex<AppState>>) {
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
 
-    let contract_address: Address = "0x5B78fF2B437296dE746454C67D5B514427995239".parse().unwrap();
+    let contract_address: Address = "0xB4AaFED11a2FbB6E049AA1266a95191703c8BEC2".parse().unwrap();
     let filter = FilterBuilder::default()
         .address(vec![contract_address])
         .build();
@@ -354,32 +380,53 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
     println!("Placing buy order for user: {}, order: {:?}", username, order);
 
     let state = data.lock().await;
-    
+
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
-    
+
     let contract = Contract::from_json(state.web3.eth(), state.contract_address, abi.to_string().as_bytes()).unwrap();
 
     let order_id = Uuid::new_v4().to_string();
     let user_id = username.clone(); // Assuming username is unique and used as user_id
 
     info!("Placing buy order: {:?}", order);
-    
+
+    // Log the parameters
+    println!("Symbol: {}", order.symbol);
+    println!("Quantity: {}", order.quantity);
+    println!("Price: {}", order.price);
+    println!("User ID: {}", user_id);
+    println!("Order ID: {}", order_id);
+    println!("Order Type: {:?}", order.order_type);
+
     let options = Options {
         gas: Some(3_000_000.into()),
         ..Default::default()
     };
 
+    let order_type = match order.order_type {
+        OrderType::Limit => U256::from(0),
+        OrderType::Market => U256::from(1),
+        OrderType::Stop => U256::from(2),
+    };
+
     let result = contract.call(
         "placeBuyOrder",
-        (order.symbol.clone(), U256::from(order.quantity), U256::from(order.price), user_id.clone(), order_id.clone()),
+        (
+            order.symbol.clone(),
+            U256::from(order.quantity),
+            U256::from(order.price),
+            user_id.clone(),
+            order_id.clone(),
+            order_type,
+        ),
         state.account,
-        options
+        options,
     ).await;
 
     match result {
         Ok(tx_id) => {
-            info!("Buy order placed successfully");
+            info!("Buy order placed successfully: tx_id = {:?}", tx_id);
             let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
             let user_state_json: String = con.get(&username).await.unwrap();
             let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
@@ -390,7 +437,7 @@ async fn place_buy_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>>
                 symbol: order.symbol.clone(),
                 quantity: order.quantity,
                 price: order.price,
-                order_type: "buy".to_string(),
+                order_type: order.order_type.as_str().to_string(),
             };
 
             // Update user's portfolio
@@ -431,32 +478,53 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>
     println!("Placing sell order for user: {}, order: {:?}", username, order);
 
     let state = data.lock().await;
-    
+
     let contract_abi: Value = serde_json::from_slice(include_bytes!("../build/contracts/OrderBook.json")).unwrap();
     let abi = contract_abi.get("abi").unwrap();
-    
+
     let contract = Contract::from_json(state.web3.eth(), state.contract_address, abi.to_string().as_bytes()).unwrap();
 
     let order_id = Uuid::new_v4().to_string();
     let user_id = username.clone(); // Assuming username is unique and used as user_id
 
     info!("Placing sell order: {:?}", order);
-    
+
+    // Log the parameters
+    println!("Symbol: {}", order.symbol);
+    println!("Quantity: {}", order.quantity);
+    println!("Price: {}", order.price);
+    println!("User ID: {}", user_id);
+    println!("Order ID: {}", order_id);
+    println!("Order Type: {:?}", order.order_type);
+
     let options = Options {
         gas: Some(3_000_000.into()),
         ..Default::default()
     };
 
+    let order_type = match order.order_type {
+        OrderType::Limit => U256::from(0),
+        OrderType::Market => U256::from(1),
+        OrderType::Stop => U256::from(2),
+    };
+
     let result = contract.call(
         "placeSellOrder",
-        (order.symbol.clone(), U256::from(order.quantity), U256::from(order.price), user_id.clone(), order_id.clone()),
+        (
+            order.symbol.clone(),
+            U256::from(order.quantity),
+            U256::from(order.price),
+            user_id.clone(),
+            order_id.clone(),
+            order_type,
+        ),
         state.account,
-        options
+        options,
     ).await;
 
     match result {
         Ok(tx_id) => {
-            info!("Sell order placed successfully");
+            info!("Sell order placed successfully: tx_id = {:?}", tx_id);
             let mut con = state.redis_client.get_multiplexed_async_connection().await.unwrap();
             let user_state_json: String = con.get(&username).await.unwrap();
             let mut user_state: UserState = serde_json::from_str(&user_state_json).unwrap();
@@ -467,7 +535,7 @@ async fn place_sell_order(req: HttpRequest, data: web::Data<AsyncMutex<AppState>
                 symbol: order.symbol.clone(),
                 quantity: order.quantity,
                 price: order.price,
-                order_type: "sell".to_string(),
+                order_type: order.order_type.as_str().to_string(),
             };
 
             // Update user's portfolio
@@ -731,7 +799,7 @@ async fn main() -> std::io::Result<()> {
 
     let transport = web3::transports::WebSocket::new("ws://localhost:8545").await.unwrap();
     let web3 = web3::Web3::new(transport);
-    let contract_address: H160 = "0x5B78fF2B437296dE746454C67D5B514427995239".parse().unwrap();
+    let contract_address: H160 = "0xB4AaFED11a2FbB6E049AA1266a95191703c8BEC2".parse().unwrap();
     let account: H160 = "0xb193Edb4a3beFd1075707fEdd494eF5Dc8441f18".parse().unwrap();
     let secret = "my_secret_key".to_string(); // Use a strong, random secret in production
 
